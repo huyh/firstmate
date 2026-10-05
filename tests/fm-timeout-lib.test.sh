@@ -18,7 +18,7 @@ TMP_ROOT=$(fm_test_tmproot fm-timeout-lib)
 # timeout variant: fm_exec_timed must take its perl watchdog here.
 PERL_ONLY="$TMP_ROOT/perl-only-bin"
 mkdir -p "$PERL_ONLY"
-for tool in perl bash sleep; do
+for tool in perl bash sh sleep; do
   ln -s "$(command -v "$tool")" "$PERL_ONLY/$tool"
 done
 
@@ -62,6 +62,20 @@ test_passes_the_command_status_and_output_through() {
   assert_contains "$out" "to-stdout" "the watchdog lost the command's stdout"
   assert_contains "$out" "to-stderr" "the watchdog lost the command's stderr"
   pass "fm_exec_timed passes a command's status and output through unchanged"
+}
+
+# A shell without BASHPID, such as the bash 3.2 a stock macOS host ships,
+# still runs the bounded command under set -u instead of aborting on the
+# unbound variable.
+test_runs_in_a_shell_without_bashpid() {
+  local out rc=0
+  out=$(
+    unset BASHPID
+    exec_timed "$PERL_ONLY" 5 1 bash -c 'echo bounded-ran; exit 3' 2>&1
+  ) || rc=$?
+  [ "$rc" -eq 3 ] || fail "fm_exec_timed without BASHPID did not run the command (rc=$rc): $out"
+  assert_contains "$out" "bounded-ran" "fm_exec_timed without BASHPID lost the command's output"
+  pass "fm_exec_timed runs a bounded command in a shell without BASHPID"
 }
 
 # A command that honors TERM ends at the bound, long before the grace would
@@ -109,7 +123,7 @@ test_the_bound_replaces_the_calling_shell() {
     rm -f "$dir/caller" "$dir/parent"
     (
       . "$ROOT/bin/fm-timeout-lib.sh"
-      printf '%s\n' "$BASHPID" > "$dir/caller"
+      printf '%s\n' "${BASHPID:-$(exec sh -c 'printf "%s\n" "$PPID"')}" > "$dir/caller"
       PATH=$path fm_exec_timed 5 1 bash -c 'echo "$PPID" > "$1"' _ "$dir/parent"
     ) || fail "the bounded probe failed under PATH=$path"
     caller=$(cat "$dir/caller")
@@ -211,7 +225,7 @@ test_an_owner_that_dies_during_startup_ends_the_command() {
   PATH=$PERL_ONLY bash -c '
     . "$1/bin/fm-timeout-lib.sh"
     (
-      echo "$BASHPID" > "$2/watchdog"
+      echo "${BASHPID:-$(exec sh -c "echo \$PPID")}" > "$2/watchdog"
       while kill -0 "$$" 2>/dev/null; do sleep 0.05; done
       fm_exec_timed 60 1 bash -c "exec sleep 300"
     ) >/dev/null 2>&1 &
@@ -328,6 +342,7 @@ test_run_timed_passes_a_natural_exit_through_a_fired_bound() {
 }
 
 test_passes_the_command_status_and_output_through
+test_runs_in_a_shell_without_bashpid
 test_run_timed_reports_the_bound_when_the_wrapper_records_a_signal_death
 test_run_timed_passes_a_natural_exit_through_a_fired_bound
 test_term_ends_a_cooperative_command_at_the_bound
